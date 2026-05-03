@@ -19,11 +19,13 @@ import java.util.HashMap;
 import com.zin.jadxaimcp.utils.PaginationUtils;
 import com.zin.jadxaimcp.utils.PaginationUtils.PaginationException;
 import com.zin.jadxaimcp.utils.JadxAIMCPPluginError;
+import com.zin.jadxaimcp.utils.SearchProgressTracker;
 
 public class MethodRoutes {
     private static final Logger logger = LoggerFactory.getLogger(MethodRoutes.class);
     private final MainWindow mainWindow;
     private final PaginationUtils paginationUtils;
+    private final SearchProgressTracker progressTracker = SearchProgressTracker.getInstance();
 
     public MethodRoutes(MainWindow mainWindow, PaginationUtils paginationUtils) {
         this.mainWindow = mainWindow;
@@ -110,14 +112,39 @@ public class MethodRoutes {
 
         try {
             JadxWrapper wrapper = mainWindow.getWrapper();
-            List<String> results = new ArrayList<>();
+            List<JavaClass> allClasses = wrapper.getIncludedClassesWithInners();
+            String searchId = progressTracker.startSearch("method:" + methodName, allClasses.size());
 
-            for (JavaClass cls : wrapper.getIncludedClassesWithInners()) {
-                if (cls.getCode().toLowerCase().contains(methodName.toLowerCase())) {
-                    results.add(cls.getFullName());
-                }
+            try {
+                String lowerMethodName = methodName.toLowerCase();
+                List<String> results = allClasses.parallelStream()
+                        .filter(cls -> {
+                            progressTracker.incrementScanned();
+                            for (JavaMethod method : cls.getMethods()) {
+                                if (method.getName().toLowerCase().contains(lowerMethodName)) {
+                                    progressTracker.incrementMatches();
+                                    return true;
+                                }
+                                // Also match construcors against class simple name
+                                if (method.isConstructor()) {
+                                    String classSimpleName = cls.getName().toLowerCase();
+                                    if (classSimpleName.contains(lowerMethodName)) {
+                                        progressTracker.incrementMatches();
+                                        return true;
+                                    }
+                                }
+                            }
+                            return false;
+                        })
+                        .map(JavaClass::getFullName)
+                        .collect(Collectors.toList());
+
+                progressTracker.completeSearch(searchId, results.size());
+                ctx.result(String.join("\n", results));
+            } catch (Exception e) {
+                progressTracker.failSearch(searchId, e.getMessage());
+                throw e;
             }
-            ctx.result(String.join("\n", results));
         } catch (Exception e) {
             JadxAIMCPPluginError.handleError(ctx, "Internal error during method search: " + e.getMessage(), e, logger);
         }    
